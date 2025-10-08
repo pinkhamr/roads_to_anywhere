@@ -1,0 +1,95 @@
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import time
+
+
+class osrm_handler():
+    def __init__(self, base_url = None):
+        if base_url:
+            self.base_url = base_url
+        else: # implied None
+            self.base_url = 'http://127.0.0.1:5000/'
+        self.nearest_url = self.base_url + 'nearest/v1/driving/'
+        self.route_url = self.base_url + 'route/v1/driving/'
+
+        # Set up the session
+        retry = Retry(connect=3, backoff_factor=0.5)
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session = requests.Session()
+        self.session.mount('http://', adapter)
+
+    
+    def get_nearest_node(self, latlon, end=False):
+        lat, lon = latlon
+
+        request = self.nearest_url + f"{lon},{lat}?number=1"
+        r = None
+        num = 0
+        while r is None:
+            try:
+                r = self.session.get(request)
+            except Exception as e:
+                print(e)
+                num += 1
+                time.sleep(1)
+                if num > 10:
+                    raise
+        r = r.json()
+
+        if r['code'] != "Ok":
+            print(f'No node found at ({lat},{lon})')
+            return -1, -1 # TODO: Fix this to raise an actual error
+
+        # Grab the node and return
+        if end:
+            node = int(r["waypoints"][0]["nodes"][1])
+        else:
+            node = int(r["waypoints"][0]["nodes"][0])  # first node only
+        result_lonlat = r["waypoints"][0]["location"]
+        result_latlon = (result_lonlat[1], result_lonlat[0])
+        return (node, result_latlon)
+
+
+    def get_route_nodes(self, latlon_start, latlon_end):
+        request = self.route_url + \
+            f"{latlon_start[1]},{latlon_start[0]};" + \
+            f"{latlon_end[1]},{latlon_end[0]}?" + \
+            "annotations=nodes"
+
+        r = None
+        num = 0
+        while r is None:
+            try:
+                r = self.session.get(request)
+            except Exception as e:
+                print(e)
+                num += 1
+                time.sleep(0.1)
+                if num > 10:
+                    raise
+        r = r.json()
+
+        if r['code'] != "Ok":
+            print(f'Route not found! {r['code']}')
+            return [] # TODO: Fix this to raise an actual error
+        
+        # Gather the node list
+        return r['routes'][0]['legs'][0]['annotation']['nodes']
+
+
+if __name__ == "__main__":
+    latlon_start = (47.640145, -122.100282)
+    latlon_end = (47.635639, -122.105031)
+
+    handler = osrm_handler()
+
+    # Try getting nodes
+    node_start, latlon_start = handler.get_nearest_node(latlon_start)
+    node_end, latlon_end = handler.get_nearest_node(latlon_end, end=True)
+
+    # Try getting a route
+    route_nodes = handler.get_route_nodes(latlon_start, latlon_end)
+
+    print(f"From {node_start} to {node_end}")
+    print(route_nodes)
