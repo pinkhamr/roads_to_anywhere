@@ -13,6 +13,7 @@ class map_anywhere():
         self.bbox = None
         self.node_dict = {}
         self.segment_counts = {}
+        self.lonlat_dict = {}
 
 
     def set_destination(self, dest_latlon):
@@ -54,13 +55,20 @@ class map_anywhere():
                     self.node_dict[n] = latlon
 
 
-    def sample_routes(self):
+    def sample_routes(self, geometry=False):
         self.segment_counts = {} # Reset
 
         for node in self.node_dict:
             start_latlon = self.node_dict[node]
 
-            nodes = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
+            if geometry:
+                nodes, lonlat_dict = self.osrm_interface.get_route_nodes_and_geometry(start_latlon, self.dest_latlon)
+
+                # Add the geometry to the saved dict. Just yolo it, no check for overwriting
+                for n in lonlat_dict:
+                    self.lonlat_dict[n] = lonlat_dict[n]
+            else:
+                nodes = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
 
             # TODO: Undo this hack when OSRM fixes their bug
             nodes = [n for n in nodes if type(n) is int]

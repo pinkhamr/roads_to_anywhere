@@ -73,9 +73,40 @@ class osrm_handler():
         if r['code'] != "Ok":
             print(f'Route not found! {r['code']}')
             return [] # TODO: Fix this to raise an actual error
-        
+
         # Gather the node list
         return r['routes'][0]['legs'][0]['annotation']['nodes']
+    
+    def get_route_nodes_and_geometry(self, latlon_start, latlon_end):
+        request = self.route_url + \
+            f"{latlon_start[1]},{latlon_start[0]};" + \
+            f"{latlon_end[1]},{latlon_end[0]}?" + \
+            "annotations=nodes&overview=full&geometries=geojson"
+
+        r = None
+        num = 0
+        while r is None:
+            try:
+                r = self.session.get(request)
+            except Exception as e:
+                print(e)
+                num += 1
+                time.sleep(0.1)
+                if num > 10:
+                    raise
+        r = r.json()
+
+        if r['code'] != "Ok":
+            print(f'Route not found! {r['code']}')
+            return [] # TODO: Fix this to raise an actual error
+        
+        # Gather the geometry and nodes from the reply
+        lonlat_list = r['routes'][0]['geometry']['coordinates']
+        nodes_list = r['routes'][0]['legs'][0]['annotation']['nodes']
+        assert len(lonlat_list) == len(nodes_list), "return data is of different lengths!!!"
+        latlon_dict = {nodes_list[i]:lonlat_list[i] for i in range(len(lonlat_list))}
+    
+        return nodes_list, latlon_dict
 
 
 if __name__ == "__main__":
