@@ -5,7 +5,7 @@ from osrm_interface import osrm_handler
 
 # Class to contain all the functionality
 class map_anywhere():
-    def __init__(self):
+    def __init__(self, parallel_workers = 1):
         # Grab the interface to osrm
         self.osrm_interface = osrm_handler() # Default is fine
         self.dest_node = 0
@@ -14,6 +14,7 @@ class map_anywhere():
         self.node_dict = {}
         self.segment_counts = {}
         self.lonlat_dict = {}
+        self.parallel_workers = parallel_workers # If >1 will do operations in parallel
 
 
     def set_destination(self, dest_latlon):
@@ -48,44 +49,65 @@ class map_anywhere():
 
         # Loop through lats + lons and get nearest nodes list
         self.node_dict = {}
-        for lat in lats:
-            for lon in lons:
+        latlon_list = [(lat, lon) for lat in lats for lon in lons]
+        if self.parallel_workers > 1:
+            results = self.osrm_interface.get_nearest_node_parallel(latlon_list, num_parallel=self.parallel_workers)
+            for n, latlon in results:
+                if n > 0:
+                    self.node_dict[n] = latlon
+        else:
+            for lat, lon in latlon_list:
                 n, latlon = self.osrm_interface.get_nearest_node((lat, lon))
                 if n > 0: # Not error
                     self.node_dict[n] = latlon
 
 
+    def _process_route_helper(self, result, geometry, node, start_latlon):
+        if geometry:
+            nodes, lonlat_dict = result
+            # Add the geometry to the saved dict. Just yolo it, no check for overwriting
+            for n in lonlat_dict:
+                self.lonlat_dict[n] = lonlat_dict[n]
+        else:
+            nodes = result
+    
+        # TODO: Undo this hack when OSRM fixes their bug
+        nodes = [n for n in nodes if type(n) is int]
+    
+        if len(nodes) == 0:
+            print(f"Warning! No route found! Start_loc: {node} @ latlon {start_latlon}")
+            return
+        if nodes[-1] != self.dest_node:
+            print(f"Warning! Destination node not at endpoint! {nodes[0]} to {nodes[-1]} (Not {self.dest_node})")
+
+        for n1, n2 in zip(nodes[:-1], nodes[1:]):
+            
+            n1n2 = (int(n1), int(n2))
+            if n1n2 in self.segment_counts:
+                self.segment_counts[n1n2] += 1
+            else:
+                self.segment_counts[n1n2] = 1
+
+
     def sample_routes(self, geometry=False):
         self.segment_counts = {} # Reset
 
-        for node in self.node_dict:
-            start_latlon = self.node_dict[node]
+        if self.parallel_workers > 1:
+            request_nodes = [n for n in self.node_dict]
+            latlons = [self.node_dict[n] for n in self.node_dict]
+            results = self.osrm_interface.get_route_nodes_parallel(latlons, self.dest_latlon, num_parallel=self.parallel_workers, geometry=geometry)
+            for i, result in enumerate(results):
+                self._process_route_helper(result, geometry, request_nodes[i], latlons[i])
+        else:
+            for node in self.node_dict:
+                start_latlon = self.node_dict[node]
 
-            if geometry:
-                nodes, lonlat_dict = self.osrm_interface.get_route_nodes_and_geometry(start_latlon, self.dest_latlon)
-
-                # Add the geometry to the saved dict. Just yolo it, no check for overwriting
-                for n in lonlat_dict:
-                    self.lonlat_dict[n] = lonlat_dict[n]
-            else:
-                nodes = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
-
-            # TODO: Undo this hack when OSRM fixes their bug
-            nodes = [n for n in nodes if type(n) is int]
-
-            if len(nodes) == 0:
-                print(f"Warning! No route found! Start_loc: {node} @ latlon {start_latlon}")
-                continue
-            if nodes[-1] != self.dest_node:
-                print(f"Warning! Destination node not at endpoint! {nodes[0]} to {nodes[-1]} (Not {self.dest_node})")
-
-            for n1, n2 in zip(nodes[:-1], nodes[1:]):
-                
-                n1n2 = (int(n1), int(n2))
-                if n1n2 in self.segment_counts:
-                    self.segment_counts[n1n2] += 1
+                if geometry:
+                    result = self.osrm_interface.get_route_nodes_and_geometry(start_latlon, self.dest_latlon)
                 else:
-                    self.segment_counts[n1n2] = 1
+                    result = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
+                
+                self._process_route_helper(result, geometry, node, start_latlon)
 
 
 class graph_node():

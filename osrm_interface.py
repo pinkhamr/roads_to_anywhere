@@ -110,18 +110,18 @@ class osrm_handler():
     
         return nodes_list, latlon_dict
 
-    def get_nearest_node_parallel(self, latlon_list, num_parallel=10):
+
+    def get_nearest_node_parallel(self, latlon_list, num_parallel=8):
         # Copy self into new items and add to a queue
         handler_queue = queue.Queue()
         for _ in range(num_parallel):
             handler_queue.put(osrm_handler(base_url=self.base_url))
         
-        results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
             futures = [executor.submit(_get_nearest_node_helper, (latlon, handler_queue)) for latlon in latlon_list]
             result_nodes = [fut.result() for fut in futures] # Blocks
         
-        # Clean up handlers
+        # Do cleanup
         while not handler_queue.empty:
             try:
                 _ = handler_queue.get_nowait()
@@ -129,6 +129,27 @@ class osrm_handler():
                 pass
         
         return result_nodes
+
+
+    def get_route_nodes_parallel(self, latlon_start_list, latlon_end, num_parallel=8, geometry=False):
+        # Copy self into new items and add to a queue
+        handler_queue = queue.Queue()
+        for _ in range(num_parallel):
+            handler_queue.put(osrm_handler(base_url=self.base_url))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_parallel) as executor:
+            futures = [executor.submit(_get_route_node_helper, ((start, latlon_end), handler_queue, geometry)) for start in latlon_start_list]
+            routes_list = [fut.result() for fut in futures] # Blocks
+        
+        # Do cleanup
+        while not handler_queue.empty:
+            try:
+                _ = handler_queue.get_nowait()
+            except queue.Empty:
+                pass
+        
+        return routes_list
+
 
 def _get_nearest_node_helper(args):
     latlon = args[0]
@@ -138,10 +159,24 @@ def _get_nearest_node_helper(args):
     handler_queue.put(handler)
     return result
 
-def _test_parallel():
+
+def _get_route_node_helper(args):
+    start, end = args[0]
+    handler_queue = args[1]
+    geometry = args[2]
+    handler = handler_queue.get()
+    if geometry:
+        result = handler.get_route_nodes_and_geometry(start, end)
+    else:
+        result = handler.get_route_nodes(start, end)
+    handler_queue.put(handler)
+    return result
+
+
+def _test_parallel_nodes():
     import numpy as np
     num_requests = 10000
-    num_parallel = 50
+    num_parallel = 8
     lat_starts = 47.640145 + (np.arange(num_requests) - 500) / 10000
     lon_starts = -122.100282 + (np.arange(num_requests) - 500) / 10000
     latlon_starts = [(float(lat), float(lon)) for lat, lon in zip(lat_starts, lon_starts)]
@@ -159,9 +194,42 @@ def _test_parallel():
     print(f"Sequential elapsed: {end - start} seconds @ {(end - start) / num_requests}s per request")
 
 
+def _test_parallel_routes():
+    import numpy as np
+    num_routes = 1000
+    num_parallel = 80
+    geometry = True
+    lat_starts = 47.640145 + (np.arange(num_routes) - 500) / 1000
+    lon_starts = -122.100282 + (np.arange(num_routes) - 500) / 1000
+    latlon_end = (47.635639, -122.105031)
+    latlon_starts = [(float(lat), float(lon)) for lat, lon in zip(lat_starts, lon_starts)]
+    handler = osrm_handler()
+    start_nodes = handler.get_nearest_node_parallel(latlon_starts, num_parallel=num_parallel)
+    latlon_starts = [n[1] for n in start_nodes]
+    start_nodes = [n[0] for n in start_nodes]
+    node_end, latlon_end = handler.get_nearest_node(latlon_end, end=True)
+
+    # Test the parallel route finding
+    print("Starting parallel requests")
+    start = time.time()
+    routes = handler.get_route_nodes_parallel(latlon_starts, latlon_end, num_parallel=num_parallel, geometry=geometry)
+    end = time.time()
+    print(f"Parallel elapsed: {end - start} seconds @ {(end - start) / num_routes}s per request")
+
+    start = time.time()
+    if geometry:
+        _ = [handler.get_route_nodes_and_geometry(latlon_start, latlon_end) for latlon_start in latlon_starts]
+    else:
+        _ = [handler.get_route_nodes(latlon_start, latlon_end) for latlon_start in latlon_starts]
+    end = time.time()
+    print(f"Sequential elapsed: {end - start} seconds @ {(end - start) / num_routes}s per request")
+
+
+
 
 if __name__ == "__main__":
-    _test_parallel()
+    # _test_parallel_nodes()
+    _test_parallel_routes()
 
 
     # latlon_start = (47.640145, -122.100282)
