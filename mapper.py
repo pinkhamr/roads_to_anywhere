@@ -64,6 +64,9 @@ class map_anywhere():
 
     def _process_route_helper(self, result, geometry, node, start_latlon):
         if geometry:
+            if len(result) != 2:
+                print(f"Warning! No route found! Start_loc: {node} @ latlon {start_latlon}")
+                return
             nodes, lonlat_dict = result
             # Add the geometry to the saved dict. Just yolo it, no check for overwriting
             for n in lonlat_dict:
@@ -89,15 +92,20 @@ class map_anywhere():
                 self.segment_counts[n1n2] = 1
 
 
-    def sample_routes(self, geometry=False):
+    def sample_routes(self, geometry=False, batch_size = 2000):
         self.segment_counts = {} # Reset
 
         if self.parallel_workers > 1:
             request_nodes = [n for n in self.node_dict]
             latlons = [self.node_dict[n] for n in self.node_dict]
-            results = self.osrm_interface.get_route_nodes_parallel(latlons, self.dest_latlon, num_parallel=self.parallel_workers, geometry=geometry)
-            for i, result in enumerate(results):
-                self._process_route_helper(result, geometry, request_nodes[i], latlons[i])
+
+            # Use batching to reduce memory overhead
+            while len(request_nodes) > 0:
+                request_minibatch = [request_nodes.pop() for _ in range(min(batch_size, len(request_nodes)))]
+                latlons_minibatch = [latlons.pop() for _ in range(len(request_minibatch))]
+                results = self.osrm_interface.get_route_nodes_parallel(latlons_minibatch, self.dest_latlon, num_parallel=self.parallel_workers, geometry=geometry)
+                for i, result in enumerate(results):
+                    self._process_route_helper(result, geometry, latlons_minibatch[i], latlons_minibatch[i])
         else:
             for node in self.node_dict:
                 start_latlon = self.node_dict[node]
