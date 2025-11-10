@@ -14,6 +14,8 @@ def routing_helper(task_queue, stop_event, result_queue):
     final_lonlat_dict = {}
     segment_counts = {}
 
+    geometry = None
+
     # Main loop
     while not stop_event.is_set():
         # Pull and process requests from the queue
@@ -67,7 +69,9 @@ def routing_helper(task_queue, stop_event, result_queue):
             else:
                 segment_counts[n1n2] = 1
     
-    if geometry:
+    if geometry is None: # Case where no tasks were given
+        result_dict = {'lonlat':{}, 'segment_counts':{}}
+    elif geometry:
         result_dict = {'lonlat': final_lonlat_dict, 'segment_counts':segment_counts}
     else:
         result_dict = {'lonlat':{}, 'segment_counts':segment_counts}
@@ -133,10 +137,9 @@ class map_anywhere():
         self.node_dict = {}
         latlon_list = [(lat, lon) for lat in lats for lon in lons]
         if self.parallel_workers > 1:
-            results = self.osrm_interface.get_nearest_node_parallel(latlon_list, num_parallel=self.parallel_workers)
-            for n, latlon in results:
-                if n > 0:
-                    self.node_dict[n] = latlon
+            result_dict = self.osrm_interface.get_nearest_node_parallel(latlon_list, num_parallel=self.parallel_workers)
+            self.node_dict.update(result_dict)
+                    
         else:
             for lat, lon in latlon_list:
                 n, latlon = self.osrm_interface.get_nearest_node((lat, lon))
@@ -172,7 +175,8 @@ class map_anywhere():
             else:
                 self.segment_counts[n1n2] = 1
 
-    def thread_manager(self, geometry=False):
+
+    def parallel_router(self, geometry=False):
         num_threads = self.parallel_workers
 
         # One shared result queue
@@ -248,30 +252,19 @@ class map_anywhere():
         return
 
 
+    # Single-threaded router
     def sample_routes(self, geometry=False, batch_size = 2000):
         self.segment_counts = {} # Reset
 
-        if self.parallel_workers > 1:
-            request_nodes = [n for n in self.node_dict]
-            latlons = [self.node_dict[n] for n in self.node_dict]
+        for node in self.node_dict:
+            start_latlon = self.node_dict[node]
 
-            # Use batching to reduce memory overhead
-            while len(request_nodes) > 0:
-                request_minibatch = [request_nodes.pop() for _ in range(min(batch_size, len(request_nodes)))]
-                latlons_minibatch = [latlons.pop() for _ in range(len(request_minibatch))]
-                results = self.osrm_interface.get_route_nodes_parallel(latlons_minibatch, self.dest_latlon, num_parallel=self.parallel_workers, geometry=geometry)
-                for i, result in enumerate(results):
-                    self._process_route_helper(result, geometry, latlons_minibatch[i], latlons_minibatch[i])
-        else:
-            for node in self.node_dict:
-                start_latlon = self.node_dict[node]
-
-                if geometry:
-                    result = self.osrm_interface.get_route_nodes_and_geometry(start_latlon, self.dest_latlon)
-                else:
-                    result = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
-                
-                self._process_route_helper(result, geometry, node, start_latlon)
+            if geometry:
+                result = self.osrm_interface.get_route_nodes_and_geometry(start_latlon, self.dest_latlon)
+            else:
+                result = self.osrm_interface.get_route_nodes(start_latlon, self.dest_latlon)
+            
+            self._process_route_helper(result, geometry, node, start_latlon)
 
 
 class graph_node():
@@ -520,10 +513,10 @@ if __name__ == "__main__":
     router.set_destination(dest_latlon)
     router.set_bounding_box(nw_latlon, se_latlon)
     # router.set_bounding_box_centered(0.054882, 0.054882)
-    router.sample_nodes(10000)
+    router.sample_nodes(1000)
     # router.sample_routes()
     print("Done sampling nodes")
-    router.thread_manager(geometry=True)
+    router.parallel_router(geometry=True)
 
     print(len(router.node_dict))
     print(len(router.segment_counts))
