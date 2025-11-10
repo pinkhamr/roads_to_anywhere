@@ -10,12 +10,12 @@ def routing_helper(task_queue, stop_event, result_queue):
     # Initialize the router
     osrm_interface = osrm_handler()
 
-    # Main loop
-    while True:
-        # Check for the stop event
-        if stop_event.is_set():
-            break
+    # Result dicts
+    final_lonlat_dict = {}
+    segment_counts = {}
 
+    # Main loop
+    while not stop_event.is_set():
         # Pull and process requests from the queue
         if task_queue.empty():
             time.sleep(0.01)
@@ -38,26 +38,47 @@ def routing_helper(task_queue, stop_event, result_queue):
                 latlon_start = request['start_latlon'],
                 latlon_end = request['dest_latlon']
             )
+    
+        # Update the local node dictionary
+        if geometry:
+            if len(osrm_result) != 2:
+                print(f"Warning! No route found! Start_loc: {request['start_node']} @ latlon {request['start_latlon']}")
+                continue
+            nodes, lonlat_dict = osrm_result
 
-        # Put results on the result queue
-        result = {
-            'start_node': request['start_node'],
-            'start_latlon': request['start_latlon'],
-            'result_osrm': osrm_result,
-        }
-        result_queue.put(result)
+            # Save the geometry
+            final_lonlat_dict.update(lonlat_dict)
+        else:
+            nodes = osrm_result
+        
+        # TODO: Undo this hack when OSRM fixes their bug
+        nodes = [n for n in nodes if type(n) is int]
+
+        if len(nodes) == 0:
+            print(f"Warning! No route found! Start_loc: {request['start_node']} @ latlon {request['start_latlon']}")
+            return
+        if nodes[-1] != request['dest_node']:
+            print(f"Warning! Destination node not at endpoint! {nodes[0]} to {nodes[-1]} (Not {request['dest_node']})")
+        
+        for n1, n2 in zip(nodes[:-1], nodes[1:]):
+            n1n2 = (int(n1), int(n2))
+            if n1n2 in segment_counts:
+                segment_counts[n1n2] += 1
+            else:
+                segment_counts[n1n2] = 1
+    
+    if geometry:
+        result_dict = {'lonlat': final_lonlat_dict, 'segment_counts':segment_counts}
+    else:
+        result_dict = {'lonlat':{}, 'segment_counts':segment_counts}
+    
+    result_queue.put(result_dict)
 
     # Cleanup
     #   (drain the result_queue to ensure it closes)
     while not task_queue.empty():
         try :
             _ = task_queue.get_nowait()
-        except queue.Empty :
-            pass
-    
-    while not result_queue.empty():
-        try :
-            _ = result_queue.get_nowait()
         except queue.Empty :
             pass
 
@@ -145,7 +166,6 @@ class map_anywhere():
             print(f"Warning! Destination node not at endpoint! {nodes[0]} to {nodes[-1]} (Not {self.dest_node})")
 
         for n1, n2 in zip(nodes[:-1], nodes[1:]):
-            
             n1n2 = (int(n1), int(n2))
             if n1n2 in self.segment_counts:
                 self.segment_counts[n1n2] += 1
@@ -174,7 +194,6 @@ class map_anywhere():
             p.start()
             threads.append(p)
         
-        num_outstanding = 0
         for i, start_node in enumerate(self.node_dict):
             request = {
                 'start_node': start_node,
@@ -185,29 +204,42 @@ class map_anywhere():
             }
 
             task_queues[i % num_threads].put(request)
-            num_outstanding += 1
         
-        while num_outstanding > 0:
-            # Put timeout logic here to break after some time
+        done = False
+        while not done:
+            # Monitor the queues to check if empty
+            for q in task_queues:
+                if not q.empty():
+                    time.sleep(0.01)
+                    continue
 
-            if result_queue.empty():
-                time.sleep(0.01)
-                continue
-            try :
-                result = result_queue.get_nowait()
-                num_outstanding -= 1
-            except queue.Empty :
-                continue
-            
-            # Process the result
-            node = result['start_node']
-            start_latlon = result['start_latlon']
-            result_osrm = result['result_osrm']
-            self._process_route_helper(result_osrm, geometry, node, start_latlon)
+                done = True
         
         # Send stop for all processes
         for E in stop_events:
             E.set()
+        
+        # Read and process the results
+        num_merged = 0
+        while num_merged < num_threads:
+            try:
+                result = result_queue.get_nowait()
+                num_merged += 1
+                print(f"Merging result {num_merged}")
+            except queue.Empty :
+                time.sleep(0.01)
+                continue
+            
+            new_lonlat_dict = result['lonlat']
+            new_segment_counts = result['segment_counts']
+
+            self.lonlat_dict.update(new_lonlat_dict)
+
+            for n1n2 in new_segment_counts:
+                if n1n2 in self.segment_counts:
+                    self.segment_counts[n1n2] += new_segment_counts[n1n2]
+                else:
+                    self.segment_counts[n1n2] = new_segment_counts[n1n2]
         
         # Join all the threads
         for thread in threads:
@@ -480,12 +512,17 @@ if __name__ == "__main__":
     # Simple example
     dest_latlon = (47.635639, -122.105031)
 
-    router = map_anywhere(parallel_workers = 4)
-    router.set_destination(dest_latlon)
-    router.set_bounding_box_centered(0.054882, 0.054882)
-    router.sample_nodes(100)
-    # router.sample_routes()
+    nw_latlon = (49.0001, -124.8)
+    se_latlon = (45.54, -116.91)
 
+
+    router = map_anywhere(parallel_workers = 14)
+    router.set_destination(dest_latlon)
+    router.set_bounding_box(nw_latlon, se_latlon)
+    # router.set_bounding_box_centered(0.054882, 0.054882)
+    router.sample_nodes(10000)
+    # router.sample_routes()
+    print("Done sampling nodes")
     router.thread_manager(geometry=True)
 
     print(len(router.node_dict))
