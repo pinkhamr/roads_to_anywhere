@@ -1,6 +1,67 @@
+import multiprocessing as mp
 import numpy as np
+import queue
+import time
 
 from osrm_interface import osrm_handler
+
+
+def routing_helper(task_queue, stop_event, result_queue):
+    # Initialize the router
+    osrm_interface = osrm_handler()
+
+    # Main loop
+    while True:
+        # Check for the stop event
+        if stop_event.is_set():
+            break
+
+        # Pull and process requests from the queue
+        if task_queue.empty():
+            time.sleep(0.01)
+            continue
+        
+        try :
+            request = task_queue.get_nowait()
+        except queue.Empty :
+            time.sleep(0.01)
+            continue
+            
+        geometry = request['geometry']
+        if geometry:
+            osrm_result = osrm_interface.get_route_nodes_and_geometry(
+                latlon_start = request['start_latlon'],
+                latlon_end = request['dest_latlon']
+            )
+        else:
+            osrm_result = osrm_interface.get_route_nodes(
+                latlon_start = request['start_latlon'],
+                latlon_end = request['dest_latlon']
+            )
+
+        # Put results on the result queue
+        result = {
+            'start_node': request['start_node'],
+            'start_latlon': request['start_latlon'],
+            'result_osrm': osrm_result,
+        }
+        result_queue.put(result)
+
+    # Cleanup
+    #   (drain the result_queue to ensure it closes)
+    while not task_queue.empty():
+        try :
+            _ = task_queue.get_nowait()
+        except queue.Empty :
+            pass
+    
+    while not result_queue.empty():
+        try :
+            _ = result_queue.get_nowait()
+        except queue.Empty :
+            pass
+
+    return
 
 
 # Class to contain all the functionality
@@ -90,6 +151,69 @@ class map_anywhere():
                 self.segment_counts[n1n2] += 1
             else:
                 self.segment_counts[n1n2] = 1
+
+    def thread_manager(self, geometry=False):
+        num_threads = self.parallel_workers
+
+        # One shared result queue
+        result_queue = mp.Queue()
+
+        # Each worker needs a task and msg queue
+        task_queues = [mp.Queue() for _ in range(num_threads)]
+        stop_events = [mp.Event() for _ in range(num_threads)]
+
+        # Launch threads
+        threads = []
+        for pid in range(num_threads):
+            kwargs = {
+                'task_queue': task_queues[pid],
+                'stop_event': stop_events[pid],
+                'result_queue': result_queue,
+            }
+            p = mp.Process(target=routing_helper, kwargs=kwargs)
+            p.start()
+            threads.append(p)
+        
+        num_outstanding = 0
+        for i, start_node in enumerate(self.node_dict):
+            request = {
+                'start_node': start_node,
+                'start_latlon': self.node_dict[start_node],
+                'dest_node': self.dest_node,
+                'dest_latlon': self.dest_latlon,
+                'geometry': geometry,
+            }
+
+            task_queues[i % num_threads].put(request)
+            num_outstanding += 1
+        
+        while num_outstanding > 0:
+            # Put timeout logic here to break after some time
+
+            if result_queue.empty():
+                time.sleep(0.01)
+                continue
+            try :
+                result = result_queue.get_nowait()
+                num_outstanding -= 1
+            except queue.Empty :
+                continue
+            
+            # Process the result
+            node = result['start_node']
+            start_latlon = result['start_latlon']
+            result_osrm = result['result_osrm']
+            self._process_route_helper(result_osrm, geometry, node, start_latlon)
+        
+        # Send stop for all processes
+        for E in stop_events:
+            E.set()
+        
+        # Join all the threads
+        for thread in threads:
+            thread.join() # May lock up
+        
+        return
 
 
     def sample_routes(self, geometry=False, batch_size = 2000):
@@ -263,8 +387,6 @@ def break_loops(tree_dict):
             
 
 
-
-
 def extract_segments(tree_dict):
     segments = [] # Will be filled with (weight, [nodes,])
 
@@ -358,11 +480,13 @@ if __name__ == "__main__":
     # Simple example
     dest_latlon = (47.635639, -122.105031)
 
-    router = map_anywhere()
+    router = map_anywhere(parallel_workers = 4)
     router.set_destination(dest_latlon)
     router.set_bounding_box_centered(0.054882, 0.054882)
     router.sample_nodes(100)
-    router.sample_routes()
+    # router.sample_routes()
+
+    router.thread_manager(geometry=True)
 
     print(len(router.node_dict))
     print(len(router.segment_counts))
